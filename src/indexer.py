@@ -10,6 +10,25 @@ def get_client() -> QdrantClient:
     return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 
 
+def check_qdrant_reachable(timeout: float = 3.0) -> None:
+    """Qdrant/Docker has dropped silently mid-session multiple times during
+    development -- without this, the first symptom is a raw httpx/httpcore
+    connection-refused stack trace many frames deep in query_points() or
+    upsert(). Fails fast with an obvious, actionable message instead. Uses
+    its own short-timeout client rather than get_client()'s default, so a
+    real slow-but-alive server elsewhere isn't penalized by this check."""
+    probe_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=timeout)
+    try:
+        probe_client.get_collections()
+    except Exception as e:
+        raise RuntimeError(
+            f"Qdrant is unreachable at {QDRANT_HOST}:{QDRANT_PORT}. "
+            f"Check Docker is running and the Qdrant container is up "
+            f"(`docker ps`, `docker start <container>`). "
+            f"Original error: {type(e).__name__}: {e}"
+        ) from e
+
+
 def ensure_collection(client: QdrantClient) -> None:
     # Only creates when missing — never drops/recreates an existing
     # collection. Recreating on every ingest run would make re-ingestion

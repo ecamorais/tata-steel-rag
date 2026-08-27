@@ -27,7 +27,6 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
 # catches fragments too small to be useful regardless of target size.
 MIN_VIABLE_PROSE_WORDS = 4
 
-
 @dataclass
 class Chunk:
     chunk_id: str
@@ -44,13 +43,43 @@ def _make_chunk_id(source_file: str, page_number: int, chunk_index: int) -> str:
     return str(uuid.uuid5(POINT_ID_NAMESPACE, f"{source_file}:{page_number}:{chunk_index}"))
 
 
+def _ends_mid_word(cell: str) -> bool:
+    return bool(cell) and cell[-1].isalpha() and cell[-1].islower()
+
+
+def _starts_mid_word(cell: str) -> bool:
+    return bool(cell) and (cell[0].islower() or cell[0] == "-")
+
+
+def _merge_split_cells(cells: list[str]) -> list[str]:
+    """Word-wrap in the source PDF sometimes splits a single label across
+    several table cells (e.g. "Property, pla" | "nt and equip" | "ment"),
+    which breaks BM25 keyword matching on the intact word — confirmed on
+    real data: this exact split made "Property, plant and equipment"
+    unmatchable in the fy2025 Balance Sheet chunk. Merges adjacent cells
+    where one ends and the next begins mid-word.
+
+    Imperfect: it can also merge a genuinely wrapped pair of already-whole
+    words (e.g. "Right-of-use" | "assets") into one bad token. Accepted —
+    those individual words stay searchable elsewhere in the corpus, whereas
+    leaving a real mid-word split unmerged makes the split term
+    unretrievable everywhere it matters."""
+    merged: list[str] = []
+    for cell in cells:
+        if merged and _ends_mid_word(merged[-1]) and _starts_mid_word(cell):
+            merged[-1] = merged[-1] + cell
+        else:
+            merged.append(cell)
+    return merged
+
+
 def _serialize_table(rows: list[list[str | None]]) -> str:
     """One line per row, blank cells dropped (word-wrap artifacts split a
     single label across several cells with no content in between — keeping
     those as empty fields would just add noise)."""
     lines = []
     for row in rows:
-        cells = [c.strip() for c in row if c and c.strip()]
+        cells = _merge_split_cells([c.strip() for c in row if c and c.strip()])
         if cells:
             lines.append(" | ".join(cells))
     return "\n".join(lines)

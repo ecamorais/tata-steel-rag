@@ -8,6 +8,21 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
 CHUNKS_PATH = PROCESSED_DIR / "chunks.jsonl"
 BM25_VECTORIZER_PATH = PROCESSED_DIR / "bm25_vectorizer.json"
+UPLOADS_DIR = PROJECT_ROOT / "data" / "uploads"
+SQLITE_LOG_PATH = PROCESSED_DIR / "query_log.db"
+
+# Confirmed live against the real API key: gemini-2.5-flash is no longer
+# available to new users (404, Google's own error redirects to
+# gemini-3.6-flash). Originally set to gemini-3.7-flash (also confirmed
+# working at the time), but that model started returning consistent 503
+# "high demand" errors on 2026-08-27 while gemini-3.6-flash (the model
+# Google's own error message recommended) stayed reliable across repeated
+# calls -- switched to the more stable, still-current model rather than
+# the newest one. Pinned explicitly rather than "gemini-flash-latest" so
+# behavior doesn't shift under us later in the project.
+GENERATION_MODEL_NAME = "gemini-3.6-flash"
+GENERATION_MAX_TOKENS = 2048
+GENERATION_TOP_K = 5
 
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
