@@ -82,3 +82,28 @@ over production hardening.
   questions (0.61 → 0.59), so reverted. Currently an accepted, documented
   limitation (see `tests/acceptance_criteria_day2.md` criterion 1) and a
   candidate for future work, not a Day 2 blocker.
+
+
+  ## Day 3 additions
+
+- **Frontend**: React + Tailwind. Login page, chat interface (upload +
+  ask + citations), protected routes (redirect to login if unauthenticated).
+- **Auth**: username/password. Passwords hashed (bcrypt/passlib). JWT
+  access tokens issued on login, required on /ask and /upload. Users
+  stored in a small SQLite table (separate from query_log.db or a
+  separate table in it — decide at implementation). No email verification,
+  no password reset flow — out of scope for a 1-day interview demo.
+  Simple signup endpoint (no invite/approval flow).
+- **Upload — real ingestion wiring**: POST /upload (authenticated) now
+  runs the actual pipeline: parse the uploaded PDF (reuse pdf_parser.py),
+  chunk it (chunker.py), re-fit BM25 across the WHOLE corpus (existing +
+  new file — BM25 vocab is global, per the Day 1 note in
+  sparse_vectorizer.py), re-embed only the new chunks, upsert into Qdrant.
+  Runs synchronously for now (no background job queue) — acceptable given
+  demo-scale document counts, but the request will block until ingestion
+  completes (could be several minutes for a large PDF).
+- **Deployment**: Docker Compose — qdrant + backend (FastAPI) + frontend
+  (React) as separate services, one `docker compose up`.
+- **Time-box**: auth implementation gets ~1 hour before falling back to a
+  simpler shared-secret gate if it's not working cleanly.
+  

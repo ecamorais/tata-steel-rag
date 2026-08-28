@@ -5,4 +5,5 @@ qdrant_storage/
 data/raw/*.pdf
 data/processed/
 .pytest_cache/
-*.egg-info/
+*.egg-info/"frontend/node_modules/" 
+"frontend/dist/" 

@@ -23,6 +23,17 @@ def _get_vectorizer() -> BM25SparseVectorizer:
     return _vectorizer
 
 
+def reset_vectorizer_cache() -> None:
+    """Forces the next hybrid_search() call to reload bm25_vectorizer.json
+    from disk. Must be called after upload_ingest.py refits BM25 -- without
+    it, a long-running server process that already served one /ask (which
+    populates the cache above) would keep scoring against the stale
+    pre-upload vocab for every subsequent /ask, silently missing terms
+    from the newly uploaded file until the process restarts."""
+    global _vectorizer
+    _vectorizer = None
+
+
 def hybrid_search(query: str, top_k: int = 5, fiscal_year: str | None = None) -> list[dict]:
     client = get_client()
     vectorizer = _get_vectorizer()

@@ -174,3 +174,9 @@ def write_chunks_jsonl(chunks: list[Chunk], path: str | Path, mode: str = "w") -
     with path.open(mode, encoding="utf-8") as f:
         for chunk in chunks:
             f.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
+
+
+def read_chunks_jsonl(path: str | Path) -> list[Chunk]:
+    path = Path(path)
+    with path.open(encoding="utf-8") as f:
+        return [Chunk(**json.loads(line)) for line in f if line.strip()]

@@ -1,3 +1,4 @@
+import os
 import re
 import uuid
 from pathlib import Path
@@ -23,6 +24,15 @@ SQLITE_LOG_PATH = PROCESSED_DIR / "query_log.db"
 GENERATION_MODEL_NAME = "gemini-3.6-flash"
 GENERATION_MAX_TOKENS = 2048
 GENERATION_TOP_K = 5
+
+# Read directly (not validated here) -- may be None if unset. Validated at
+# API startup (src/auth.py's check_jwt_secret_configured(), called from
+# api.py's lifespan) so a missing secret fails fast and loudly at process
+# start, the same pattern as check_qdrant_reachable(), rather than 500ing
+# on the first login/signup call.
+JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 24
 
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
