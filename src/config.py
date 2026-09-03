@@ -57,6 +57,24 @@ EMBEDDING_DIM = 384
 PROSE_CHUNK_MIN_WORDS = 250
 PROSE_CHUNK_MAX_WORDS = 400
 
+# Tables at or above this many rows get auxiliary per-row "table_row"
+# chunks alongside the whole-table chunk (see chunker.py) -- addresses the
+# large-table retrieval dilution limitation. 20 cleanly separates the big
+# statement tables (Balance Sheet, P&L, Cash Flow: 60-90+ rows) from the
+# much smaller disclosure tables typical elsewhere in this corpus.
+LARGE_TABLE_MIN_ROWS = 20
+
+# Row-chunking quality gate: if more than this fraction of a large table's
+# value-bearing rows would produce an empty/near-empty/dash-only label,
+# skip row-chunk generation for the WHOLE table (fall back to the
+# whole-table chunk only). Confirmed necessary on real data: a PP&E
+# reconciliation table's Additions/Disposals/Depreciation sub-rows produced
+# garbled labels like "- - - -" (dash used as a "nil" filler, misread as
+# label text) that still scored 0.80+ cosine on shared boilerplate alone,
+# burying the correct answer from a different, simpler table sharing the
+# same subject matter.
+LARGE_TABLE_LABEL_QUALITY_THRESHOLD = 0.30
+
 # Fixed namespace for deriving deterministic per-chunk point IDs (uuid5),
 # so re-ingesting unchanged PDFs upserts the same points instead of
 # creating duplicates.

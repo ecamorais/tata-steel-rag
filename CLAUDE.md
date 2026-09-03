@@ -66,22 +66,54 @@ over production hardening.
 
 ## Known limitations
 
-- **Large-table retrieval gap (unresolved).** A table chunk gets a single
-  dense + sparse vector for its entire content; for a large table (e.g.
-  the 83-row Balance Sheet), that one vector's relevance to any single
-  line item is diluted across dozens of unrelated rows, so a natural-
-  language question about one specific figure (e.g. Property, Plant and
-  Equipment) doesn't retrieve it even at top 60. Tried: (1) table
-  cell-merge fix for word-wrapped labels — worked, kept (`chunker.py`).
-  (2) Condensed dense-embedding text (strip note/page reference codes) —
-  tested, made no meaningful difference (dilution comes from the other
-  ~80 unrelated rows, not reference-code noise). (3) Row-level auxiliary
-  dense vectors (one extra vector per row, sharing the parent chunk's
-  payload/citation) — tested, big improvement on bare keyword phrases
-  (0.61 → 0.81 cosine) but no improvement on full natural-language
-  questions (0.61 → 0.59), so reverted. Currently an accepted, documented
-  limitation (see `tests/acceptance_criteria_day2.md` criterion 1) and a
-  candidate for future work, not a Day 2 blocker.
+- **Large-table retrieval gap (largely resolved; one specific table
+  remains a known exception).** A table chunk gets a single dense +
+  sparse vector for its entire content; for a large table (e.g. the
+  83-row Balance Sheet), that one vector's relevance to any single line
+  item is diluted across dozens of unrelated rows. Two early approaches
+  didn't work: (1) condensed dense-embedding text (strip note/page
+  reference codes) — no meaningful difference, dilution comes from the
+  other ~80 unrelated rows, not reference-code noise. (2) Row-level
+  auxiliary *dense-only* vectors using bare spreadsheet-fragment text
+  (label + raw values, no sentence structure) — big improvement on bare
+  keyword phrases (0.61 → 0.81 cosine) but no improvement on full
+  natural-language questions (0.61 → 0.59), reverted.
+
+  What worked: generating one natural-language sentence per row (label +
+  values + section_title + fiscal_year, e.g. "In the BALANCE SHEET for
+  FY2024-25 (tata-steel-fy2025.pdf), Property, plant and equipment was
+  93,203.83 as at March 31, 2025, compared to ...") and indexing it as
+  both a dense **and** sparse vector on its own child chunk
+  (`chunk_type="table_row"`), alongside the existing whole-table chunk —
+  confirmed via cheap cosine comparison before indexing (0.79 vs. the
+  0.61 baseline and 0.59 failed attempt) and validated live post-index.
+  Two data-quality gates were added on top, both confirmed necessary on
+  real data: a table-level gate skips row-chunking entirely for a table
+  where >30% of rows would produce an empty/near-empty/dash-only label
+  (`LARGE_TABLE_LABEL_QUALITY_THRESHOLD` in `config.py`), and a per-row
+  filter additionally drops individually poor-labeled rows even inside an
+  otherwise-accepted table.
+
+  **Net result, tested against 4 independently-chosen real facts spanning
+  multiple tables and documents: 3 of 4 now retrieve and answer
+  correctly** (Capital work-in-progress FY2024-25, Finance costs
+  FY2024-25, and Property/Plant/Equipment as at March 31, 2022 — a
+  different fiscal year's filing entirely). **One case remains a known,
+  precisely-diagnosed exception**: Property, Plant and Equipment as at
+  March 31, 2025 specifically, blocked by the FY2025 filing's Note 3 PP&E
+  reconciliation schedule, which produces two garbage patterns the
+  quality gates don't catch — (a) a "Title Deeds not available"
+  sub-table's column-misalignment fragments (real text, ≥3 characters, so
+  not flagged as poor, but semantically nonsensical after extraction),
+  and (b) rows with more than 3 value columns (spanning up to 7 fiscal
+  years), which breaks the sentence generator's current/prior/prior-prior
+  date-arithmetic assumption. Deliberately not chased further: fixing the
+  first garbage mode (dash-only labels) immediately surfaced these two
+  different ones — the signature of diminishing returns on one
+  adversarial table, not a sign the general approach doesn't work. See
+  `tests/acceptance_criteria_day2.md` criterion 1 (now tested against a
+  passing case) and `DEMO_REFERENCE.md` (flags this specific query to
+  avoid live).
 
 - **Gemini free-tier daily request quota (~20/day/model).** A live 429
   from `gemini-3.6-flash` reported `quotaId:

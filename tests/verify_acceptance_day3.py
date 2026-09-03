@@ -22,8 +22,15 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
+
+# Real answers can contain non-ASCII characters (Rs symbol, etc.) that
+# Windows' default console codepage (cp1252) can't encode -- same crash
+# confirmed live in verify_acceptance_day2.py. Reconfigured up front so
+# evidence prints regardless of the host console's codepage.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
@@ -39,6 +46,7 @@ from src.indexer import (
     update_sparse_vectors,
 )
 from src.sparse_vectorizer import BM25SparseVectorizer
+from src.users_store import get_user_by_username, mark_user_verified
 
 client = TestClient(app, raise_server_exceptions=False)
 results: list[tuple[int, str, bool]] = []
@@ -57,6 +65,22 @@ def check(number: int, description: str, passed: bool, evidence: str) -> None:
     print(f"[{status}] Criterion {number}: {description}")
     print(f"       {evidence}")
     print()
+
+
+def ask_with_retry(query: str, headers: dict, retries: int = 2):
+    """Real /ask calls occasionally hit a transient Gemini 503 ('high
+    demand', a free-tier capacity issue, not a bug) -- same retry pattern
+    as verify_acceptance_day2.py's ask() helper, added here after a live
+    run failed criteria 4/5 on a transient 503 unrelated to anything being
+    tested."""
+    response = None
+    for attempt in range(retries + 1):
+        response = client.post("/ask", json={"query": query}, headers=headers)
+        if response.status_code == 200:
+            return response
+        if attempt < retries:
+            time.sleep(5)
+    return response
 
 
 def make_test_pdf(path: Path) -> None:
@@ -81,13 +105,30 @@ def make_test_pdf(path: Path) -> None:
 
 
 def check_signup_and_login(username: str, password: str) -> str | None:
-    r_signup = client.post("/signup", json={"username": username, "password": password})
+    # delivered@resend.dev is Resend's documented always-accepted test
+    # address -- confirmed live, works regardless of account owner, unlike
+    # an arbitrary @example.com address (which sandbox mode rejects
+    # outright: "Invalid `to` field... instead of domains like
+    # example.com").
+    r_signup = client.post(
+        "/signup", json={"username": username, "email": "delivered@resend.dev", "password": password}
+    )
     check(
         1,
         "A new user can sign up with a username/password",
         r_signup.status_code == 201,
         f"status={r_signup.status_code}, body={r_signup.json()}",
     )
+
+    # Email verification (added post-Day-3, see CLAUDE.md) now gates
+    # login. Bypassed here via a direct DB write rather than a real
+    # inbox/click -- Day 3's own criteria are about signup/login working,
+    # not about the separately-tested email flow, and a real Resend send
+    # to a fake @example.com address would fail sandbox-mode delivery
+    # anyway.
+    user = get_user_by_username(username)
+    if user is not None:
+        mark_user_verified(user["id"])
 
     r_login = client.post("/login", json={"username": username, "password": password})
     token = r_login.json().get("access_token") if r_login.status_code == 200 else None
@@ -137,11 +178,7 @@ def check_reject_missing_invalid_token() -> None:
 def check_real_upload_ingestion(token: str, pdf_path: Path) -> dict | None:
     headers = {"Authorization": f"Bearer {token}"}
 
-    r_ask_before = client.post(
-        "/ask",
-        json={"query": "What was Tata Steel's revenue from operations in FY2024-25?"},
-        headers=headers,
-    )
+    r_ask_before = ask_with_retry("What was Tata Steel's revenue from operations in FY2024-25?", headers)
 
     with pdf_path.open("rb") as f:
         r_upload = client.post(
@@ -164,10 +201,8 @@ def check_real_upload_ingestion(token: str, pdf_path: Path) -> dict | None:
         check(6, "BM25 is re-fit across the full corpus after an upload", False, "skipped -- upload failed")
         return None
 
-    r_ask_after = client.post(
-        "/ask",
-        json={"query": f"What was the Verification Reserve reported by the {UNIQUE_KEYWORD.capitalize()} Division?"},
-        headers=headers,
+    r_ask_after = ask_with_retry(
+        f"What was the Verification Reserve reported by the {UNIQUE_KEYWORD.capitalize()} Division?", headers
     )
     ask_body = r_ask_after.json() if r_ask_after.status_code == 200 else {}
     answer = ask_body.get("answer", "")

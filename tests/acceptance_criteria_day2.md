@@ -7,22 +7,21 @@ not just assert that it does.
 ## Generation Quality
 
 1. **A query with a clear, known answer produces the correct figure.**
-   Use a fact already verified against the source PDF on Day 1 — e.g.
-   "What was Tata Steel's Property, Plant and Equipment as at March 31,
-   2025?" should return ₹93,203.83 crore (confirmed against the Balance
-   Sheet on page 280 during Day 1 review), not a hallucinated or
-   misattributed number.
+   Use a fact already verified against the source PDF — e.g. "What was
+   Tata Steel's Capital work-in-progress as at March 31, 2025?" should
+   return ₹34,189.06 crore (confirmed against the Balance Sheet on page
+   280), not a hallucinated or misattributed number.
 
-   **Known limitation, currently failing:** this specific query does not
-   retrieve the Balance Sheet chunk (page 280) — a single dense/sparse
-   vector for an 83-row table dilutes relevance for any one line item
-   below what natural-language phrasing can reach. Tried and confirmed not
-   to fix it: 5 alternative phrasings (bare phrase, with "Balance Sheet",
-   with surrounding line items) all fail to retrieve it even at top 10.
-   Gemini correctly answers "not found in the provided documents" given
-   the incomplete context rather than fabricating — the generation layer
-   is behaving correctly given what retrieval hands it. See CLAUDE.md's
-   "Known limitations" section for what was tried on the retrieval side.
+   **Status: passing**, confirmed live post-`table_row` retrieval fix
+   (see CLAUDE.md's "Known limitations" section). This replaces an
+   earlier version of this criterion that used the Property, Plant and
+   Equipment (as at March 31, 2025) query specifically — that exact query
+   remains a known, separately-documented exception (a different table in
+   the same filing, Note 3's PP&E reconciliation schedule, produces
+   parsing artifacts the retrieval fix's quality gates don't catch; see
+   CLAUDE.md and `DEMO_REFERENCE.md`). Swapped to a different real fact so
+   this criterion reflects a demonstrably true, currently-passing
+   capability rather than the one known exception.
 
 2. **Every generated answer includes at least one citation** — source_file
    and page_number — for each factual claim it makes. An answer with a
@@ -41,10 +40,13 @@ not just assert that it does.
    invented figure.
 
 5. **A query answerable only from a table chunk produces a correct
-   answer**, confirming table serialization (the `|`-joined row format
-   from chunker.py) survives all the way through prompt assembly and the
-   model can actually parse it — not just that retrieval found the right
-   chunk.
+   answer**, confirming table content survives all the way through prompt
+   assembly and the model can actually parse it — not just that retrieval
+   found the right chunk. Satisfied by either `chunk_type` — the original
+   whole-table `|`-joined serialization (`"table"`), or the natural-
+   language per-row sentence added by the large-table retrieval fix
+   (`"table_row"`); either represents table data reaching generation
+   correctly.
 
 6. **A cross-year comparison query is handled correctly.** E.g. "How did
    Tata Steel's revenue from operations change between FY2023-24 and

@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from src.config import (
+    LARGE_TABLE_LABEL_QUALITY_THRESHOLD,
+    LARGE_TABLE_MIN_ROWS,
     POINT_ID_NAMESPACE,
     PROSE_CHUNK_MAX_WORDS,
     PROSE_CHUNK_MIN_WORDS,
@@ -71,6 +73,71 @@ def _merge_split_cells(cells: list[str]) -> list[str]:
         else:
             merged.append(cell)
     return merged
+
+
+_VALUE_CELL_RE = re.compile(r"^\(?-?[\d,]+\.\d{1,2}\)?$")
+_SKIP_CELL_RE = re.compile(r"^\(?[a-hA-H]\)?$|^\d{1,3}$|^[A-Za-z]\d+$")
+
+
+def _classify_row(raw_cells: list[str | None]) -> tuple[str, list[str]] | None:
+    """Separates a large-table row into its label text and its numeric
+    values, dropping list markers like "(a)", bare note-reference numbers,
+    and page-reference codes like "F44" -- confirmed against the real
+    fy2025 Balance Sheet's PP&E row, which mixes all of these in with the
+    label and values ('(a)', 'Property, plant and equipment', '3', 'F44',
+    '93,203.83', '92,358.28', '91,934.87'). Returns None for rows with no
+    values at all -- section headers inside the table itself (e.g.
+    "Assets", "I Non-current assets") have nothing to build a sentence
+    from."""
+    cells = _merge_split_cells([c.strip() for c in raw_cells if c and c.strip()])
+    label_parts: list[str] = []
+    values: list[str] = []
+    for cell in cells:
+        if _VALUE_CELL_RE.match(cell):
+            values.append(cell)
+        elif _SKIP_CELL_RE.match(cell):
+            continue
+        else:
+            label_parts.append(cell)
+    label = " ".join(label_parts)
+    if not values or not label:
+        return None
+    return label, values
+
+
+def _label_is_poor(label: str) -> bool:
+    """A label that's under 3 characters or made entirely of dashes/
+    whitespace isn't a usable row identifier -- confirmed on real data: a
+    PP&E reconciliation table's Additions/Disposals/Depreciation sub-rows
+    produced labels like "- - - -" (dash used as a "nil" filler in the
+    source table, misread as label text) that still scored 0.80+ cosine
+    purely from shared boilerplate, burying a correct answer from a
+    different, simpler table on the same subject."""
+    stripped = label.strip()
+    if len(stripped) < 3:
+        return True
+    return bool(re.fullmatch(r"[-\s]+", stripped))
+
+
+def _row_sentence(section_title: str | None, fiscal_year: str, source_file: str, label: str, values: list[str]) -> str:
+    """Natural-language sentence for one large-table row, meant to embed
+    close to how a real question is phrased -- confirmed empirically
+    (0.79 cosine vs. a 0.61 whole-table baseline and a 0.59 failed
+    bare-row-text attempt) on the real PP&E case before this was wired in.
+
+    Dates are computed from fiscal_year (reliable -- derived from the
+    filename) rather than parsed from the table's own header cells, which
+    are badly fragmented in this corpus (e.g. "As at\\nMar" / "ch 31, 2025"
+    split across two separate rows) and not worth the fragility of trying
+    to reconstruct exactly."""
+    end_year = 2000 + int(fiscal_year.split("-")[1])
+    dates = [f"March 31, {end_year - i}" for i in range(len(values))]
+    section = section_title or "table"
+    main_clause = f"In the {section} for {fiscal_year} ({source_file}), {label} was {values[0]} as at {dates[0]}"
+    tail_bits = [f"{v} as at {d}" for v, d in zip(values[1:], dates[1:])]
+    if tail_bits:
+        return main_clause + ", compared to " + ", and ".join(tail_bits) + "."
+    return main_clause + "."
 
 
 def _serialize_table(rows: list[list[str | None]]) -> str:
@@ -144,6 +211,47 @@ def chunk_blocks(blocks: list[TableBlock | ProseBlock], source_path: str | Path)
                 )
             )
             index += 1
+
+            if len(block.rows) >= LARGE_TABLE_MIN_ROWS:
+                candidates = [c for c in (_classify_row(row) for row in block.rows) if c is not None]
+                poor_fraction = (
+                    sum(1 for label, _ in candidates if _label_is_poor(label)) / len(candidates)
+                    if candidates
+                    else 0.0
+                )
+                # Quality gate: a table whose rows mostly don't classify
+                # cleanly (e.g. a reconciliation schedule with dash "nil"
+                # fillers) skips row-chunking entirely rather than emitting
+                # garbled sentences that can outrank a correct answer
+                # elsewhere -- confirmed necessary on real data (see
+                # _label_is_poor). Falls back to the whole-table chunk
+                # only, same as before this feature existed.
+                if poor_fraction <= LARGE_TABLE_LABEL_QUALITY_THRESHOLD:
+                    # Table-level gate only rules out tables that are
+                    # mostly bad; a table under threshold can still carry
+                    # a minority of individually poor rows (confirmed on
+                    # real data: a table with a low overall poor_fraction
+                    # still let a dash-only "- - - - -" row through) --
+                    # filtered here too. Safe: _label_is_poor only ever
+                    # flags empty/near-empty/dash-only text, so this can
+                    # only remove noise, never a genuinely good row.
+                    for label, values in candidates:
+                        if _label_is_poor(label):
+                            continue
+                        sentence = _row_sentence(block.section_title, fiscal_year, source_file, label, values)
+                        chunks.append(
+                            Chunk(
+                                chunk_id=_make_chunk_id(source_file, block.page_number, index),
+                                text=sentence,
+                                source_file=source_file,
+                                fiscal_year=fiscal_year,
+                                page_number=block.page_number,
+                                section_title=block.section_title,
+                                chunk_type="table_row",
+                                chunk_index=index,
+                            )
+                        )
+                        index += 1
         else:
             sentences = _split_sentences(block.text)
             if not sentences:
