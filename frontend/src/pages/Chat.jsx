@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { ask, uploadPdf } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { ask, getHistory, uploadPdf } from '../api'
 import { useAuth } from '../context/AuthContext'
 
 export default function Chat() {
@@ -9,10 +9,32 @@ export default function Chat() {
   const [asking, setAsking] = useState(false)
   const [askError, setAskError] = useState('')
   const [answer, setAnswer] = useState(null)
+  const [viewingHistoryId, setViewingHistoryId] = useState(null)
 
   const [uploadStatus, setUploadStatus] = useState(null)
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef(null)
+
+  const [history, setHistory] = useState([])
+  const [historyError, setHistoryError] = useState('')
+
+  async function fetchHistory() {
+    try {
+      const result = await getHistory(token)
+      setHistory(result)
+      setHistoryError('')
+    } catch (err) {
+      setHistoryError(err.message)
+    }
+  }
+
+  useEffect(() => {
+    fetchHistory()
+    // Only re-fetch on mount -- fetchHistory is also called explicitly
+    // after a successful ask below, so it doesn't belong in this effect's
+    // dependencies as well (that would just be a second, redundant fetch).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function handleAsk(event) {
     event.preventDefault()
@@ -20,14 +42,22 @@ export default function Chat() {
     setAsking(true)
     setAskError('')
     setAnswer(null)
+    setViewingHistoryId(null)
     try {
       const result = await ask(query, token)
       setAnswer(result)
+      fetchHistory()
     } catch (err) {
       setAskError(err.message)
     } finally {
       setAsking(false)
     }
+  }
+
+  function handleSelectHistory(item) {
+    setAnswer({ answer: item.answer, found: item.found, citations: item.citations })
+    setAskError('')
+    setViewingHistoryId(item.id)
   }
 
   async function handleUpload(event) {
@@ -62,64 +92,92 @@ export default function Chat() {
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-2xl flex-col gap-8 px-4 py-8">
-        <section>
-          <form onSubmit={handleAsk} className="flex gap-2">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Ask a question about the annual reports..."
-              className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
-            />
-            <button
-              type="submit"
-              disabled={asking || !query.trim()}
-              className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
-            >
-              {asking ? 'Asking...' : 'Ask'}
-            </button>
-          </form>
+      <main className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 md:flex-row md:items-start">
+        <div className="flex flex-1 flex-col gap-8">
+          <section>
+            <form onSubmit={handleAsk} className="flex gap-2">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Ask a question about the annual reports..."
+                className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={asking || !query.trim()}
+                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+              >
+                {asking ? 'Asking...' : 'Ask'}
+              </button>
+            </form>
 
-          {askError && <p className="mt-3 text-sm text-red-600">{askError}</p>}
+            {askError && <p className="mt-3 text-sm text-red-600">{askError}</p>}
 
-          {answer && (
-            <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4">
-              <p className="whitespace-pre-wrap text-sm text-slate-800">{answer.answer}</p>
-              {answer.citations.length > 0 && (
-                <div className="mt-3 border-t border-slate-100 pt-3">
-                  <p className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">Sources</p>
-                  <ul className="space-y-1">
-                    {answer.citations.map((citation, index) => (
-                      <li key={`${citation.source_file}-${citation.page_number}-${index}`} className="text-xs text-slate-500">
-                        {citation.source_file}, page {citation.page_number}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-        </section>
+            {answer && (
+              <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4">
+                {viewingHistoryId !== null && (
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">From history</p>
+                )}
+                <p className="whitespace-pre-wrap text-sm text-slate-800">{answer.answer}</p>
+                {answer.citations.length > 0 && (
+                  <div className="mt-3 border-t border-slate-100 pt-3">
+                    <p className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">Sources</p>
+                    <ul className="space-y-1">
+                      {answer.citations.map((citation, index) => (
+                        <li key={`${citation.source_file}-${citation.page_number}-${index}`} className="text-xs text-slate-500">
+                          {citation.source_file}, page {citation.page_number}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
 
-        <section className="rounded-lg border border-slate-200 bg-white p-4">
-          <h2 className="mb-2 text-sm font-medium text-slate-700">Upload a new annual report (PDF)</h2>
-          <form onSubmit={handleUpload} className="flex items-center gap-2">
-            <input ref={fileInputRef} type="file" accept="application/pdf" className="flex-1 text-sm text-slate-600" />
-            <button
-              type="submit"
-              disabled={uploading}
-              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-            >
-              {uploading ? 'Uploading...' : 'Upload'}
-            </button>
-          </form>
-          {uploadStatus && (
-            <p className={`mt-3 text-sm ${uploadStatus.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
-              {uploadStatus.message}
-            </p>
-          )}
-        </section>
+          <section className="rounded-lg border border-slate-200 bg-white p-4">
+            <h2 className="mb-2 text-sm font-medium text-slate-700">Upload a new annual report (PDF)</h2>
+            <form onSubmit={handleUpload} className="flex items-center gap-2">
+              <input ref={fileInputRef} type="file" accept="application/pdf" className="flex-1 text-sm text-slate-600" />
+              <button
+                type="submit"
+                disabled={uploading}
+                className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {uploading ? 'Uploading...' : 'Upload'}
+              </button>
+            </form>
+            {uploadStatus && (
+              <p className={`mt-3 text-sm ${uploadStatus.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                {uploadStatus.message}
+              </p>
+            )}
+          </section>
+        </div>
+
+        <aside className="w-full shrink-0 rounded-lg border border-slate-200 bg-white p-4 md:w-72">
+          <h2 className="mb-2 text-sm font-medium text-slate-700">History</h2>
+          {historyError && <p className="text-sm text-red-600">{historyError}</p>}
+          {!historyError && history.length === 0 && <p className="text-sm text-slate-400">No questions asked yet.</p>}
+          <ul className="space-y-1">
+            {history.map((item) => (
+              <li key={item.id}>
+                <button
+                  type="button"
+                  onClick={() => handleSelectHistory(item)}
+                  title={item.query}
+                  className={`w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-slate-50 ${
+                    viewingHistoryId === item.id ? 'bg-slate-100' : ''
+                  }`}
+                >
+                  <p className="truncate text-slate-700">{item.query}</p>
+                  <p className="text-xs text-slate-400">{new Date(item.timestamp).toLocaleString()}</p>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </aside>
       </main>
     </div>
   )

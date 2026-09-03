@@ -71,6 +71,12 @@ not just assert that it does.
     a future version" message) — it must not silently accept the file and
     do nothing, and must not crash.
 
+    **SUPERSEDED by Day 3:** /upload no longer returns a 501 stub -- Day 3
+    replaced it with real ingestion (parse/chunk/embed/index), verified by
+    tests/verify_acceptance_day3.py criterion 5. This criterion's original
+    assertion (expects a 501 "not implemented" response) is intentionally
+    no longer true and is not re-tested here.
+
 11. **Every /ask call is logged** — query, retrieved chunks (with scores
     and metadata), the final assembled prompt, and the answer — to a
     persistent local store (file or SQLite). Verify by making a real call

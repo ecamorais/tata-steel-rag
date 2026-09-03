@@ -83,6 +83,22 @@ over production hardening.
   limitation (see `tests/acceptance_criteria_day2.md` criterion 1) and a
   candidate for future work, not a Day 2 blocker.
 
+- **Gemini free-tier daily request quota (~20/day/model).** A live 429
+  from `gemini-3.6-flash` reported `quotaId:
+  GenerateRequestsPerDayPerProjectPerModel-FreeTier, quotaValue: 20` —
+  confirmed via testing to be a genuine per-day cap, not a per-minute one:
+  waited 30s and retried, still 429 (a per-minute/rolling limit would have
+  recovered by then). A separate, different error ("prepayment credits are
+  depleted," pointing at Gemini's billing/prepay docs) also surfaced later
+  the same evening — not investigated further and not resolved tonight;
+  not proceeding with paid billing for now. The free-tier daily cap above
+  is the constraint to plan demo pacing around until/unless that changes.
+  `gemini-2.5-flash` and `gemini-2.0-flash` were checked live as potential
+  higher-quota fallbacks and are both hard-404 "no longer available" for
+  this project's API key — `gemini-3.6-flash` remains the only working
+  option, so this is a pacing constraint, not something to switch away
+  from.
+
 
   ## Day 3 additions
 
@@ -107,3 +123,17 @@ over production hardening.
 - **Time-box**: auth implementation gets ~1 hour before falling back to a
   simpler shared-secret gate if it's not working cleanly.
   
+  ## Email verification (added post-Day-3)
+
+- Users must verify their email before their account is usable (or
+  before /ask works -- decide scope: block login entirely, or allow
+  login but block /ask/upload until verified -- default: block login).
+- Email sending via Resend (RESEND_API_KEY env var, same fail-fast
+  startup check pattern as JWT_SECRET_KEY).
+- Signup requires an email field (not just username) going forward.
+- Verification: a random token generated at signup, emailed as a link
+  (e.g. /verify?token=...), stored in the users table with an
+  `is_verified` boolean and `verification_token` column.
+- Existing users created before this feature: treated as already
+  verified (no forced re-verification) -- migration-safe like the Day 3
+  username column addition.

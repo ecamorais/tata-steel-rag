@@ -1,11 +1,12 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { login as apiLogin, signup as apiSignup } from '../api'
 import { useAuth } from '../context/AuthContext'
 
 export default function Login() {
   const [mode, setMode] = useState('login') // 'login' | 'signup'
   const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [info, setInfo] = useState('')
@@ -13,6 +14,19 @@ export default function Login() {
 
   const { login } = useAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  useEffect(() => {
+    const verified = searchParams.get('verified')
+    if (verified === 'true') {
+      setInfo('Email verified -- you can log in now.')
+    } else if (verified === 'false') {
+      setError('Verification link is invalid or has expired.')
+    }
+    // Only meant to run once, from whatever ?verified= was on the URL when
+    // this page first loaded -- not on every searchParams change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -25,10 +39,10 @@ export default function Login() {
         login(result.access_token, username)
         navigate('/chat')
       } else {
-        await apiSignup(username, password)
+        await apiSignup(username, email, password)
         setMode('login')
         setPassword('')
-        setInfo('Account created. Log in below.')
+        setInfo('Account created. Check your email for a verification link, then log in below.')
       }
     } catch (err) {
       setError(err.message)
@@ -65,6 +79,21 @@ export default function Login() {
               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
             />
           </div>
+          {mode === 'signup' && (
+            <div>
+              <label htmlFor="email" className="mb-1 block text-sm font-medium text-slate-700">
+                Email
+              </label>
+              <input
+                id="email"
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+              />
+            </div>
+          )}
           <div>
             <label htmlFor="password" className="mb-1 block text-sm font-medium text-slate-700">
               Password

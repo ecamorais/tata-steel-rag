@@ -7,13 +7,22 @@ Usage: python -m tests.verify_acceptance_day2
 """
 
 import concurrent.futures
+import sqlite3
 import sys
 import time
+import uuid
+
+# Real answers routinely contain non-ASCII characters (Rs symbol, etc.).
+# Windows' default console codepage (cp1252) can't encode them -- confirmed
+# live: this crashed mid-run on a real Rs figure in a cross-year answer,
+# aborting the script before later criteria even ran. Reconfigured to
+# UTF-8 so evidence prints regardless of the host console's codepage.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi.testclient import TestClient
 
 from src.api import app
-from src.config import UPLOADS_DIR
+from src.config import SQLITE_LOG_PATH
 from src.logging_store import get_all_calls, init_db
 
 # raise_server_exceptions=False: an unhandled exception (e.g. a transient
@@ -25,12 +34,49 @@ client = TestClient(app, raise_server_exceptions=False)
 
 results: list[tuple[int, str, bool]] = []
 
+# This script predates Day 3's auth work -- /ask and /upload became
+# auth-gated after these criteria were originally written. A fresh
+# throwaway user is created per run (same pattern as
+# verify_acceptance_day3.py) and used for every call below; deleted in
+# main()'s finally block.
+_TEST_USERNAME = f"verify_day2_{uuid.uuid4().hex[:8]}"
+_TEST_PASSWORD = "verify_day2_password"
+_auth_headers: dict[str, str] = {}
+
+
+def _authenticate() -> None:
+    signup_response = client.post("/signup", json={"username": _TEST_USERNAME, "password": _TEST_PASSWORD})
+    if signup_response.status_code != 201:
+        raise RuntimeError(f"could not sign up test user: {signup_response.status_code} {signup_response.text}")
+    login_response = client.post("/login", json={"username": _TEST_USERNAME, "password": _TEST_PASSWORD})
+    if login_response.status_code != 200:
+        raise RuntimeError(f"could not log in test user: {login_response.status_code} {login_response.text}")
+    _auth_headers["Authorization"] = f"Bearer {login_response.json()['access_token']}"
+
+
+def _cleanup_test_user() -> None:
+    conn = sqlite3.connect(SQLITE_LOG_PATH)
+    conn.execute("DELETE FROM users WHERE username = ?", (_TEST_USERNAME,))
+    conn.commit()
+    conn.close()
+
 
 def check(number: int, description: str, passed: bool, evidence: str) -> None:
     results.append((number, description, passed))
     status = "PASS" if passed else "FAIL"
     print(f"[{status}] Criterion {number}: {description}")
     print(f"       {evidence}")
+    print()
+
+
+def check_superseded(number: int, description: str, note: str) -> None:
+    # `passed=None` marks a criterion as superseded rather than pass/fail --
+    # excluded from the pass/fail tally in main()'s sign-off (a criterion
+    # whose original assertion is intentionally no longer true isn't a
+    # failure, and counting it as one misrepresents the actual state).
+    results.append((number, description, None))
+    print(f"[SUPERSEDED] Criterion {number}: {description}")
+    print(f"       {note}")
     print()
 
 
@@ -44,7 +90,7 @@ def ask(query: str, fiscal_year: str | None = None, retries: int = 2):
         body["fiscal_year"] = fiscal_year
     response = None
     for attempt in range(retries + 1):
-        response = client.post("/ask", json=body)
+        response = client.post("/ask", json=body, headers=_auth_headers)
         if response.status_code == 200:
             return response
         if attempt < retries:
@@ -206,9 +252,16 @@ def check_fiscal_year_filter() -> None:
 
 
 def check_malformed_input() -> None:
-    empty_query = client.post("/ask", json={"query": ""})
-    missing_field = client.post("/ask", json={"fiscal_year": "FY2024-25"})
-    non_json = client.post("/ask", content=b"not json at all", headers={"Content-Type": "application/json"})
+    # A valid token is attached here too -- these check body validation
+    # (empty/missing query, non-JSON), not auth, so a real token isolates
+    # that from the 401s that would otherwise mask the actual result.
+    empty_query = client.post("/ask", json={"query": ""}, headers=_auth_headers)
+    missing_field = client.post("/ask", json={"fiscal_year": "FY2024-25"}, headers=_auth_headers)
+    non_json = client.post(
+        "/ask",
+        content=b"not json at all",
+        headers={**_auth_headers, "Content-Type": "application/json"},
+    )
     statuses = [empty_query.status_code, missing_field.status_code, non_json.status_code]
     all_4xx = all(400 <= s < 500 for s in statuses)
     check(
@@ -220,24 +273,14 @@ def check_malformed_input() -> None:
 
 
 def check_upload_stub() -> None:
-    fake_pdf = b"%PDF-1.4 fake content for verification"
-    response = client.post("/upload", files={"file": ("verify_day2_test.pdf", fake_pdf, "application/pdf")})
-    body = response.json()
-    detail = body.get("detail", {})
-    looks_right = (
-        response.status_code == 501
-        and isinstance(detail, dict)
-        and "not" in detail.get("status", "").lower()
-    )
-    check(
+    check_superseded(
         10,
         "POST /upload accepts a PDF and returns a clear, explicit not-yet-implemented response",
-        looks_right,
-        f"status={response.status_code}, body={body}",
+        "SUPERSEDED by Day 3: /upload no longer returns a 501 stub -- Day 3 replaced it with "
+        "real ingestion (parse/chunk/embed/index), verified by tests/verify_acceptance_day3.py "
+        'criterion 5. This criterion\'s original assertion (expects a 501 "not implemented" '
+        "response) is intentionally no longer true and is not re-tested here.",
     )
-    stray_file = UPLOADS_DIR / "verify_day2_test.pdf"
-    if stray_file.exists():
-        stray_file.unlink()
 
 
 def check_concurrent_calls() -> None:
@@ -252,7 +295,7 @@ def check_concurrent_calls() -> None:
     before_count = len(get_all_calls())
 
     def fire(i: int):
-        return client.post("/ask", json={"query": f"What is Tata Steel? (concurrency probe {i})"})
+        return client.post("/ask", json={"query": f"What is Tata Steel? (concurrency probe {i})"}, headers=_auth_headers)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         responses = list(executor.map(fire, range(4)))
@@ -285,24 +328,32 @@ def main() -> None:
 
     init_db()
 
-    print("=== Generation Quality ===\n")
-    check_ppe_query()
-    check_unsupported_query()
-    check_cross_year_query()
-    check_fiscal_year_filter()
+    try:
+        _authenticate()
 
-    print("=== API ===\n")
-    check_malformed_input()
-    check_upload_stub()
-    check_concurrent_calls()
+        print("=== Generation Quality ===\n")
+        check_ppe_query()
+        check_unsupported_query()
+        check_cross_year_query()
+        check_fiscal_year_filter()
 
-    print("=== Sign-off ===")
-    passed_count = sum(1 for _, _, p in results if p)
-    for number, description, passed in sorted(results, key=lambda r: r[0]):
-        print(f"  [{'x' if passed else ' '}] {number}. {description}")
-    print(f"\n{passed_count}/{len(results)} criteria passed.")
-    if passed_count != len(results):
-        sys.exit(1)
+        print("=== API ===\n")
+        check_malformed_input()
+        check_upload_stub()
+        check_concurrent_calls()
+
+        print("=== Sign-off ===")
+        passed_count = sum(1 for _, _, p in results if p is True)
+        superseded_count = sum(1 for _, _, p in results if p is None)
+        active_count = len(results) - superseded_count
+        for number, description, passed in sorted(results, key=lambda r: r[0]):
+            marker = "~" if passed is None else ("x" if passed else " ")
+            print(f"  [{marker}] {number}. {description}")
+        print(f"\n{passed_count}/{active_count} active criteria passed ({superseded_count} superseded, not counted).")
+        if passed_count != active_count:
+            sys.exit(1)
+    finally:
+        _cleanup_test_user()
 
 
 if __name__ == "__main__":

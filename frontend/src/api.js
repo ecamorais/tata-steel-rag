@@ -44,8 +44,8 @@ async function request(path, { method = 'GET', token, json, formData } = {}) {
   return data
 }
 
-export function signup(username, password) {
-  return request('/signup', { method: 'POST', json: { username, password } })
+export function signup(username, email, password) {
+  return request('/signup', { method: 'POST', json: { username, email, password } })
 }
 
 export function login(username, password) {
@@ -62,4 +62,8 @@ export function uploadPdf(file, token) {
   const formData = new FormData()
   formData.append('file', file)
   return request('/upload', { method: 'POST', token, formData })
+}
+
+export function getHistory(token) {
+  return request('/history', { method: 'GET', token })
 }

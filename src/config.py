@@ -34,6 +34,17 @@ JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 
+# Same fail-fast pattern: read here (may be None), validated at API startup
+# by src/email_verification.py's check_resend_configured().
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+# Resend's sandbox sender -- works with no verified domain, but only
+# delivers to the Resend account's own verified email address. Fine for
+# tonight's solo demo rehearsal; a verified custom domain would be needed
+# to let arbitrary signups actually receive mail.
+RESEND_FROM_EMAIL = "onboarding@resend.dev"
+FRONTEND_BASE_URL = "http://localhost:5173"
+BACKEND_BASE_URL = "http://localhost:8000"
+
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
 COLLECTION_NAME = "tata_steel_reports"

@@ -2,17 +2,26 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import RedirectResponse
+from google.genai.errors import ClientError, ServerError
+from pydantic import BaseModel, EmailStr, Field
 
 from src.auth import check_jwt_secret_configured, create_access_token, get_current_user, hash_password, verify_password
-from src.config import GENERATION_TOP_K, UPLOADS_DIR
+from src.config import FRONTEND_BASE_URL, GENERATION_TOP_K, UPLOADS_DIR
+from src.email_verification import check_resend_configured, generate_verification_token, send_verification_email
 from src.generator import generate_answer
 from src.indexer import check_qdrant_reachable
-from src.logging_store import init_db, log_call
+from src.logging_store import get_calls_by_username, init_db, log_call
 from src.prompt import build_user_content
 from src.retriever import hybrid_search
 from src.upload_ingest import ingest_uploaded_pdf
-from src.users_store import create_user, get_user_by_username, init_users_table
+from src.users_store import (
+    create_user,
+    get_user_by_username,
+    get_user_by_verification_token,
+    init_users_table,
+    mark_user_verified,
+)
 
 
 @asynccontextmanager
@@ -23,6 +32,7 @@ async def lifespan(app: FastAPI):
     # for JWT_SECRET_KEY: fail at startup, not on the first login call.
     check_qdrant_reachable()
     check_jwt_secret_configured()
+    check_resend_configured()
     yield
 
 
@@ -46,6 +56,7 @@ init_users_table()
 
 class SignupRequest(BaseModel):
     username: str = Field(min_length=1)
+    email: EmailStr
     password: str = Field(min_length=8)
 
 
@@ -55,13 +66,36 @@ class SignupResponse(BaseModel):
 
 @app.post("/signup", response_model=SignupResponse, status_code=201)
 def signup(request: SignupRequest) -> SignupResponse:
+    token = generate_verification_token()
     try:
-        create_user(request.username, hash_password(request.password))
+        create_user(request.username, hash_password(request.password), str(request.email), token)
     except ValueError as e:
         # create_user raises ValueError on a duplicate username (see
         # users_store.py) -- 409 Conflict, not a 500.
         raise HTTPException(status_code=409, detail=str(e))
+
+    try:
+        send_verification_email(str(request.email), token)
+    except Exception as e:
+        # Fails loudly rather than silently leaving an account that can
+        # never receive its verification link -- consistent with this
+        # project's no-silent-failures pattern elsewhere (e.g. the
+        # ingest_uploaded_pdf error handling in /upload).
+        raise HTTPException(
+            status_code=502,
+            detail=f"Account created, but the verification email failed to send: {e}",
+        )
+
     return SignupResponse(username=request.username)
+
+
+@app.get("/verify")
+def verify(token: str) -> RedirectResponse:
+    user = get_user_by_verification_token(token)
+    if user is None:
+        return RedirectResponse(url=f"{FRONTEND_BASE_URL}/login?verified=false")
+    mark_user_verified(user["id"])
+    return RedirectResponse(url=f"{FRONTEND_BASE_URL}/login?verified=true")
 
 
 class LoginRequest(BaseModel):
@@ -77,8 +111,13 @@ class LoginResponse(BaseModel):
 @app.post("/login", response_model=LoginResponse)
 def login(request: LoginRequest) -> LoginResponse:
     user = get_user_by_username(request.username)
+    # Password checked before is_verified: a wrong password always gets the
+    # same generic message, so a login attempt can't be used to probe
+    # whether an account exists but is simply unverified.
     if user is None or not verify_password(request.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not user["is_verified"]:
+        raise HTTPException(status_code=403, detail="Please verify your email before logging in.")
     return LoginResponse(access_token=create_access_token(user["username"]))
 
 
@@ -98,10 +137,32 @@ class AskResponse(BaseModel):
     citations: list[CitationResponse]
 
 
+GEMINI_BUSY_MESSAGE = "The AI service is temporarily busy, please try again in a moment."
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest, user: dict = Depends(get_current_user)) -> AskResponse:
     chunks = hybrid_search(request.query, top_k=GENERATION_TOP_K, fiscal_year=request.fiscal_year)
-    result = generate_answer(request.query, chunks)
+    try:
+        result = generate_answer(request.query, chunks)
+    except ClientError as e:
+        if e.code == 429:
+            # Free-tier Gemini rate limit -- confirmed live to otherwise
+            # surface as an unhandled 500 with NO CORS headers (Starlette's
+            # default error response bypasses CORSMiddleware), which a real
+            # browser blocks outright and reports as "Failed to fetch" --
+            # useless to whoever's using the app. A clean HTTPException
+            # response does get CORS headers, so this actually fixes what
+            # the browser shows, not just the wording.
+            raise HTTPException(status_code=503, detail=GEMINI_BUSY_MESSAGE)
+        raise
+    except ServerError:
+        # Any 5xx from Gemini (e.g. the real 503 "high demand" seen live
+        # during testing) is the service's own transient trouble, not a
+        # mistake in our request -- unlike ClientError, every ServerError
+        # code is safe to treat as "busy, retry," not just one specific
+        # code. Same CORS-header reasoning as the ClientError branch above.
+        raise HTTPException(status_code=503, detail=GEMINI_BUSY_MESSAGE)
 
     # Cheap insurance against citing a page never actually shown to the
     # model: drop any citation that doesn't match a chunk we retrieved
@@ -121,6 +182,7 @@ def ask(request: AskRequest, user: dict = Depends(get_current_user)) -> AskRespo
         retrieved_chunks=chunks,
         prompt_text=prompt_text,
         answer=answer_payload,
+        username=user["username"],
     )
 
     return AskResponse(
@@ -128,6 +190,36 @@ def ask(request: AskRequest, user: dict = Depends(get_current_user)) -> AskRespo
         found=result.found,
         citations=[CitationResponse(source_file=c.source_file, page_number=c.page_number) for c in valid_citations],
     )
+
+
+HISTORY_LIMIT = 50
+
+
+class HistoryEntry(BaseModel):
+    id: int
+    timestamp: str
+    query: str
+    fiscal_year_filter: str | None
+    answer: str
+    found: bool
+    citations: list[CitationResponse]
+
+
+@app.get("/history", response_model=list[HistoryEntry])
+def history(user: dict = Depends(get_current_user)) -> list[HistoryEntry]:
+    calls = get_calls_by_username(user["username"], limit=HISTORY_LIMIT)
+    return [
+        HistoryEntry(
+            id=call["id"],
+            timestamp=call["timestamp"],
+            query=call["query"],
+            fiscal_year_filter=call["fiscal_year_filter"],
+            answer=call["answer"]["answer"],
+            found=call["answer"]["found"],
+            citations=[CitationResponse(**c) for c in call["answer"]["citations"]],
+        )
+        for call in calls
+    ]
 
 
 @app.post("/upload")
