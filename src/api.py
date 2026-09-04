@@ -10,10 +10,11 @@ from src.auth import check_jwt_secret_configured, create_access_token, get_curre
 from src.config import FRONTEND_BASE_URL, GENERATION_TOP_K, UPLOADS_DIR
 from src.email_verification import check_resend_configured, generate_verification_token, send_verification_email
 from src.generator import generate_answer
-from src.indexer import check_qdrant_reachable
+from src.indexer import check_qdrant_reachable, ensure_fiscal_year_index, get_client
+from src.intent import detect_comparison_intent
 from src.logging_store import get_calls_by_username, init_db, log_call
-from src.prompt import build_user_content
-from src.retriever import hybrid_search
+from src.prompt import build_comparison_user_content, build_user_content
+from src.retriever import compare_across_documents, hybrid_search
 from src.upload_ingest import ingest_uploaded_pdf
 from src.users_store import (
     create_user,
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
     # /ask request hit a raw connection-refused stack trace. Same reasoning
     # for JWT_SECRET_KEY: fail at startup, not on the first login call.
     check_qdrant_reachable()
+    ensure_fiscal_year_index(get_client())
     check_jwt_secret_configured()
     check_resend_configured()
     yield
@@ -124,6 +126,8 @@ def login(request: LoginRequest) -> LoginResponse:
 class AskRequest(BaseModel):
     query: str = Field(min_length=1)
     fiscal_year: str | None = None
+    compare: bool = False
+    fiscal_years: list[str] | None = None
 
 
 class CitationResponse(BaseModel):
@@ -142,9 +146,13 @@ GEMINI_BUSY_MESSAGE = "The AI service is temporarily busy, please try again in a
 
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest, user: dict = Depends(get_current_user)) -> AskResponse:
-    chunks = hybrid_search(request.query, top_k=GENERATION_TOP_K, fiscal_year=request.fiscal_year)
+    is_comparison = request.compare or detect_comparison_intent(request.query)
+    if is_comparison:
+        chunks = compare_across_documents(request.query, fiscal_years=request.fiscal_years)
+    else:
+        chunks = hybrid_search(request.query, top_k=GENERATION_TOP_K, fiscal_year=request.fiscal_year)
     try:
-        result = generate_answer(request.query, chunks)
+        result = generate_answer(request.query, chunks, comparison_mode=is_comparison)
     except ClientError as e:
         if e.code == 429:
             # Free-tier Gemini rate limit -- confirmed live to otherwise
@@ -163,6 +171,16 @@ def ask(request: AskRequest, user: dict = Depends(get_current_user)) -> AskRespo
         # code is safe to treat as "busy, retry," not just one specific
         # code. Same CORS-header reasoning as the ClientError branch above.
         raise HTTPException(status_code=503, detail=GEMINI_BUSY_MESSAGE)
+    except Exception:
+        # Fallback for any Gemini-side failure that isn't a ClientError or
+        # ServerError -- confirmed live during comparison-feature testing:
+        # a network/timeout exception from the genai SDK crashed as a bare
+        # unhandled 500 with no CORS headers, the exact "Failed to fetch"
+        # browser symptom the two handlers above were already built to
+        # avoid. Degrading any such failure to the same clean "busy"
+        # message is strictly better than an unhandled crash, even though
+        # it's not always literally a busy-retry situation.
+        raise HTTPException(status_code=503, detail=GEMINI_BUSY_MESSAGE)
 
     # Cheap insurance against citing a page never actually shown to the
     # model: drop any citation that doesn't match a chunk we retrieved
@@ -170,7 +188,13 @@ def ask(request: AskRequest, user: dict = Depends(get_current_user)) -> AskRespo
     retrieved_keys = {(c["source_file"], c["page_number"]) for c in chunks}
     valid_citations = [c for c in result.citations if (c.source_file, c.page_number) in retrieved_keys]
 
-    prompt_text = build_user_content(request.query, chunks)
+    if is_comparison:
+        prompt_text = build_comparison_user_content(request.query, chunks)
+        fiscal_year_filter = ",".join(sorted({c["fiscal_year"] for c in chunks}))
+    else:
+        prompt_text = build_user_content(request.query, chunks)
+        fiscal_year_filter = request.fiscal_year
+
     answer_payload = {
         "answer": result.answer,
         "found": result.found,
@@ -178,11 +202,12 @@ def ask(request: AskRequest, user: dict = Depends(get_current_user)) -> AskRespo
     }
     log_call(
         query=request.query,
-        fiscal_year_filter=request.fiscal_year,
+        fiscal_year_filter=fiscal_year_filter,
         retrieved_chunks=chunks,
         prompt_text=prompt_text,
         answer=answer_payload,
         username=user["username"],
+        is_comparison=is_comparison,
     )
 
     return AskResponse(

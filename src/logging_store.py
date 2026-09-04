@@ -42,12 +42,25 @@ def _ensure_username_column(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE query_log ADD COLUMN username TEXT")
 
 
+def _ensure_is_comparison_column(conn: sqlite3.Connection) -> None:
+    """Additive migration, same pattern as _ensure_username_column above:
+    query_log predates comparison-mode support. For a comparison call,
+    fiscal_year_filter holds a comma-joined list of years instead of a
+    single value -- this boolean disambiguates that from an ordinary
+    single-year filtered call without needing to string-parse the column.
+    Existing rows get NULL, read as falsy by every consumer."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(query_log)")}
+    if "is_comparison" not in columns:
+        conn.execute("ALTER TABLE query_log ADD COLUMN is_comparison INTEGER")
+
+
 def init_db(path: str | Path = SQLITE_LOG_PATH) -> None:
     conn = _connect(path)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_SCHEMA)
         _ensure_username_column(conn)
+        _ensure_is_comparison_column(conn)
         conn.commit()
     finally:
         conn.close()
@@ -60,14 +73,15 @@ def log_call(
     prompt_text: str,
     answer: dict,
     username: str,
+    is_comparison: bool = False,
     path: str | Path = SQLITE_LOG_PATH,
 ) -> int:
     conn = _connect(path)
     try:
         cursor = conn.execute(
             "INSERT INTO query_log "
-            "(timestamp, query, fiscal_year_filter, retrieved_chunks_json, prompt_text, answer_json, username) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(timestamp, query, fiscal_year_filter, retrieved_chunks_json, prompt_text, answer_json, username, is_comparison) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
                 query,
@@ -76,6 +90,7 @@ def log_call(
                 prompt_text,
                 json.dumps(answer, ensure_ascii=False),
                 username,
+                int(is_comparison),
             ),
         )
         conn.commit()

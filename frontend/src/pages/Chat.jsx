@@ -10,6 +10,7 @@ export default function Chat() {
   const [askError, setAskError] = useState('')
   const [answer, setAnswer] = useState(null)
   const [viewingHistoryId, setViewingHistoryId] = useState(null)
+  const [compareMode, setCompareMode] = useState(false)
 
   const [uploadStatus, setUploadStatus] = useState(null)
   const [uploading, setUploading] = useState(false)
@@ -44,7 +45,7 @@ export default function Chat() {
     setAnswer(null)
     setViewingHistoryId(null)
     try {
-      const result = await ask(query, token)
+      const result = await ask(query, token, { compare: compareMode })
       setAnswer(result)
       fetchHistory()
     } catch (err) {
@@ -95,21 +96,32 @@ export default function Chat() {
       <main className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 md:flex-row md:items-start">
         <div className="flex flex-1 flex-col gap-8">
           <section>
-            <form onSubmit={handleAsk} className="flex gap-2">
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Ask a question about the annual reports..."
-                className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
-              />
-              <button
-                type="submit"
-                disabled={asking || !query.trim()}
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
-              >
-                {asking ? 'Asking...' : 'Ask'}
-              </button>
+            <form onSubmit={handleAsk} className="flex flex-col gap-2">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Ask a question about the annual reports..."
+                  className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={asking || !query.trim()}
+                  className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                >
+                  {asking ? 'Asking...' : 'Ask'}
+                </button>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={compareMode}
+                  onChange={(e) => setCompareMode(e.target.checked)}
+                  className="rounded border-slate-300"
+                />
+                Compare across all years
+              </label>
             </form>
 
             {askError && <p className="mt-3 text-sm text-red-600">{askError}</p>}

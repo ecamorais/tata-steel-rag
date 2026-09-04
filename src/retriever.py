@@ -8,9 +8,17 @@ from qdrant_client.models import (
     Prefetch,
 )
 
-from src.config import BM25_VECTORIZER_PATH, COLLECTION_NAME, DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
+from src.config import (
+    BM25_VECTORIZER_PATH,
+    COLLECTION_NAME,
+    COMPARISON_TOP_K_MAX,
+    COMPARISON_TOP_K_MIN,
+    COMPARISON_TOTAL_CHUNK_BUDGET,
+    DENSE_VECTOR_NAME,
+    SPARSE_VECTOR_NAME,
+)
 from src.embeddings import encode_query
-from src.indexer import get_client
+from src.indexer import discover_fiscal_years, get_client
 from src.sparse_vectorizer import BM25SparseVectorizer
 
 _vectorizer: BM25SparseVectorizer | None = None
@@ -98,3 +106,36 @@ def hybrid_search(query: str, top_k: int = 5, fiscal_year: str | None = None) ->
             }
         )
     return hits
+
+
+def compare_across_documents(
+    query: str,
+    fiscal_years: list[str] | None = None,
+    top_k_per_year: int | None = None,
+) -> list[dict]:
+    """Runs hybrid_search() once per fiscal year (reusing its existing
+    exact-match filter) instead of one global search, so every indexed
+    year is guaranteed representation in the results -- a single search's
+    top-k ranking is global and can otherwise let one year's chunks
+    out-rank and silently crowd out another's.
+
+    Returns a flat list[dict], contiguously grouped by year (each year's
+    hybrid_search results appended in order) rather than a dict keyed by
+    year -- every downstream consumer (build_user_content/generate_answer,
+    api.py's citation validation, log_call's JSON dump) already expects
+    list[dict], and each chunk already self-describes its own fiscal_year,
+    so the grouping is fully recoverable without changing those contracts.
+    """
+    if fiscal_years is None:
+        fiscal_years = discover_fiscal_years(get_client())
+    if not fiscal_years:
+        return []
+
+    if top_k_per_year is None:
+        budget = COMPARISON_TOTAL_CHUNK_BUDGET // len(fiscal_years)
+        top_k_per_year = max(COMPARISON_TOP_K_MIN, min(COMPARISON_TOP_K_MAX, budget))
+
+    results = []
+    for year in fiscal_years:
+        results.extend(hybrid_search(query, top_k=top_k_per_year, fiscal_year=year))
+    return results

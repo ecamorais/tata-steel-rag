@@ -54,6 +54,33 @@ def ensure_collection(client: QdrantClient) -> None:
     )
 
 
+def ensure_fiscal_year_index(client: QdrantClient) -> None:
+    """Qdrant's facet() API (used by discover_fiscal_years below) 400s
+    without a payload index on the faceted field -- confirmed live against
+    the real collection: "No appropriate index for faceting: `fiscal_year`.
+    Please create one to facet on this field." Idempotent and safe to call
+    on every startup: creating an index that already exists is a no-op and
+    doesn't touch any existing points or vectors."""
+    info = client.get_collection(COLLECTION_NAME)
+    if "fiscal_year" in (info.payload_schema or {}):
+        return
+    client.create_payload_index(collection_name=COLLECTION_NAME, field_name="fiscal_year", field_schema="keyword")
+
+
+def discover_fiscal_years(client: QdrantClient, limit: int = 100) -> list[str]:
+    """Distinct fiscal_year values currently indexed, discovered live
+    rather than hardcoded -- so comparison-mode retrieval (see
+    compare_across_documents in retriever.py) automatically covers new
+    fiscal years as they're uploaded, with no code change. exact=False is
+    fine here: only the distinct values are needed, not exact per-value
+    counts, and an approximate facet at a generous limit still enumerates
+    every distinct value present."""
+    if not client.collection_exists(COLLECTION_NAME):
+        return []
+    response = client.facet(collection_name=COLLECTION_NAME, key="fiscal_year", limit=limit, exact=False)
+    return sorted({str(hit.value) for hit in response.hits})
+
+
 def upsert_chunks(
     client: QdrantClient,
     chunks: list[Chunk],

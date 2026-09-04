@@ -75,6 +75,16 @@ LARGE_TABLE_MIN_ROWS = 20
 # same subject matter.
 LARGE_TABLE_LABEL_QUALITY_THRESHOLD = 0.30
 
+# Comparison-mode retrieval (compare_across_documents in retriever.py) runs
+# one hybrid_search() per indexed fiscal year rather than one global
+# top-k search, so per-year k must shrink as more years get indexed --
+# otherwise the prompt grows unbounded (e.g. 10 years x 5 chunks/year = 50
+# chunks in one prompt). Budget is a total across all years; actual
+# per-year k is budget // num_years, clamped to [MIN, MAX].
+COMPARISON_TOTAL_CHUNK_BUDGET = 15
+COMPARISON_TOP_K_MIN = 2
+COMPARISON_TOP_K_MAX = 6
+
 # Fixed namespace for deriving deterministic per-chunk point IDs (uuid5),
 # so re-ingesting unchanged PDFs upserts the same points instead of
 # creating duplicates.

@@ -52,9 +52,10 @@ export function login(username, password) {
   return request('/login', { method: 'POST', json: { username, password } })
 }
 
-export function ask(query, token, fiscalYear) {
+export function ask(query, token, { fiscalYear, compare } = {}) {
   const payload = { query }
   if (fiscalYear) payload.fiscal_year = fiscalYear
+  if (compare) payload.compare = true
   return request('/ask', { method: 'POST', token, json: payload })
 }
 
